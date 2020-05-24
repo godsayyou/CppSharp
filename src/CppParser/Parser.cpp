@@ -32,6 +32,7 @@
 #include <clang/AST/Comment.h>
 #include <clang/AST/DeclFriend.h>
 #include <clang/AST/ExprCXX.h>
+#include <clang/CodeGen/CodeGenAction.h>
 #include <clang/Lex/DirectoryLookup.h>
 #include <clang/Lex/HeaderSearch.h>
 #include <clang/Lex/Preprocessor.h>
@@ -45,6 +46,7 @@
 #include <clang/Driver/ToolChain.h>
 #include <clang/Driver/Util.h>
 #include <clang/Index/USRGeneration.h>
+#include <lld/Common/Driver.h>
 
 #include <CodeGen/TargetInfo.h>
 #include <CodeGen/CGCall.h>
@@ -4494,6 +4496,55 @@ ParserResult* Parser::ParseLibrary(const std::string& File)
     return res;
 }
 
+ParserResult* Parser::Build(const std::string& File)
+{
+    llvm::InitializeAllAsmPrinters();
+    Setup();
+
+    std::unique_ptr<::DiagnosticConsumer> DiagClient(new ::DiagnosticConsumer());
+    c->getDiagnostics().setClient(DiagClient.get(), false);
+
+    c->getFrontendOpts().Inputs.clear();
+    c->getFrontendOpts().Inputs.push_back(clang::FrontendInputFile(File, clang::Language::CXX));
+    c->getFrontendOpts().OutputFile = std::string(llvm::sys::path::stem(File)) + ".o";
+
+    llvm::LLVMContext context;
+    std::unique_ptr<clang::CodeGenAction> action = std::make_unique<clang::EmitObjAction>(&context);
+    c->ExecuteAction(*action);
+
+    std::vector<const char*> args;
+
+    const llvm::Triple& triple = c->getTarget().getTriple();
+    switch (triple.getOS())
+    {
+    case llvm::Triple::OSType::Win32:
+        args.push_back("-flavor link");
+        switch (triple.getEnvironment())
+        {
+        case llvm::Triple::EnvironmentType::GNU:
+            lld::mingw::link(args, true, llvm::outs(), llvm::errs());
+            break;
+        default:
+            lld::coff::link(args, true, llvm::outs(), llvm::errs());
+            break;
+        }
+        break;
+    case llvm::Triple::OSType::Linux:
+        args.push_back("-flavor gnu");
+        lld::elf::link(args, true, llvm::outs(), llvm::errs());
+        break;
+    case llvm::Triple::OSType::MacOSX:
+        args.push_back("-flavor darwin");
+        lld::mach_o::link(args, true, llvm::outs(), llvm::errs());
+        break;
+    }
+    // 3. Pass the correct parameters - help with the regular lld at the command line if necessary
+
+    auto res = new ParserResult();
+    HandleDiagnostics(res);
+    return res;
+}
+
 ParserResult* ClangParser::ParseHeader(CppParserOptions* Opts)
 {
     if (!Opts)
@@ -4532,6 +4583,15 @@ ParserResult* ClangParser::ParseLibrary(CppParserOptions* Opts)
 
     Parser Parser(Opts);
     return Parser.ParseLibrary(Opts->libraryFile);
+}
+
+ParserResult* ClangParser::Build(CppParserOptions* Opts, const std::string& File)
+{
+    if (!Opts)
+        return 0;
+
+    Parser Parser(Opts);
+    return Parser.Build(File);
 }
 
 ParserTargetInfo* Parser::GetTargetInfo()
